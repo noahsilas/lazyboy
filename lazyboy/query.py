@@ -11,7 +11,9 @@ from lazyboy.connection import get_pool
 
 
 def get_count(key, consistency=None):
+    """ Get the column count for a key """
     consistency = consistency or cas_types.ConsistencyLevel.ONE
-    return get_pool(key.keyspace).get_count(
+    count = get_pool(key.keyspace).get_count(
         key.keyspace, key.key, key.get_path(), consistency
     )
+    return count
