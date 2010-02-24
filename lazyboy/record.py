@@ -120,8 +120,8 @@ class Record(CassandraBase, dict):
 
     @staticmethod
     def timestamp():
-        """Return a GMT UNIX timestamp."""
-        return int(time.time())
+        """Returns milliseconds since epoch."""
+        return int(time.time()*1000)
 
     def __setitem__(self, item, value):
         """Set an item, storing it into the _columns backing store."""

@@ -44,7 +44,7 @@ class MockClient(Client):
             cols.append(ColumnOrSuperColumn(
                     column=Column(name=uuid.uuid4().hex,
                                   value=uuid.uuid4().hex,
-                                  timestamp=time.time())))
+                                  timestamp=time.time()*1000)))
         _last_cols.extend(cols)
         return cols
 
