@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 #
-# © 2009 Digg, Inc. All rights reserved.
+# © 2009, 2010 Digg, Inc. All rights reserved.
 # Author: Ian Eure <ian@digg.com>
 #
 """Lazyboy: Views."""
 
 import datetime
 import uuid
+import traceback
+from itertools import islice
 
-from cassandra.ttypes import SlicePredicate, SliceRange
+from cassandra.ttypes import SlicePredicate, SliceRange, Column
 
 from lazyboy.key import Key
 from lazyboy.base import CassandraBase
-from lazyboy.iterators import multigetterator, unpack
+from lazyboy.iterators import multigetterator, unpack, chunk_seq
 from lazyboy.record import Record
 from lazyboy.connection import Client
 
@@ -35,7 +37,8 @@ class View(CassandraBase):
 
     """A regular view."""
 
-    def __init__(self, view_key=None, record_key=None, record_class=None):
+    def __init__(self, view_key=None, record_key=None, record_class=None,
+                 start_col=None, exclusive=False):
         assert not view_key or isinstance(view_key, Key)
         assert not record_key or isinstance(record_key, Key)
         assert not record_class or isinstance(record_class, type)
@@ -46,7 +49,10 @@ class View(CassandraBase):
         self.key = view_key
         self.record_key = record_key
         self.record_class = record_class or Record
-        self.reversed = 0
+        self.reversed = False
+        self.last_col = None
+        self.start_col = start_col
+        self.exclusive = exclusive
 
     def __repr__(self):
         return "%s: %s" % (self.__class__.__name__, self.key)
@@ -56,12 +62,12 @@ class View(CassandraBase):
         return self._get_cas().get_count(
             self.key.keyspace, self.key.key, self.key, self.consistency)
 
-    def _keys(self, start_col=None, end_col=None):
-        """Return keys in the view."""
+    def _cols(self, start_col=None, end_col=None):
+        """Yield columns in the view."""
         client = self._get_cas()
         assert isinstance(client, Client), \
             "Incorrect client instance: %s" % client.__class__
-        last_col = start_col or ""
+        last_col = start_col or self.start_col or ""
         end_col = end_col or ""
         chunk_size = self.chunk_size
         passes = 0
@@ -69,7 +75,8 @@ class View(CassandraBase):
             # When you give Cassandra a start key, it's included in the
             # results. We want it in the first pass, but subsequent iterations
             # need to the count adjusted and the first record dropped.
-            fudge = int(passes > 0)
+            fudge = 1 if self.exclusive else int(passes > 0)
+
             cols = client.get_slice(
                 self.key.keyspace, self.key.key, self.key,
                 SlicePredicate(slice_range=SliceRange(
@@ -80,17 +87,28 @@ class View(CassandraBase):
                 raise StopIteration()
 
             for col in unpack(cols[fudge:]):
-                yield self.record_key.clone(key=col.value)
+                yield col
+                last_col = col.name
 
-            last_col = col.name
             passes += 1
 
             if len(cols) < self.chunk_size:
                 raise StopIteration()
 
+    def _keys(self, start_col=None, end_col=None):
+        """Yield keys in this view"""
+        return (self.make_key(col) for col in self._cols(start_col, end_col))
+
+    def make_key(self, column):
+        """Make a record key for a column."""
+        assert isinstance(column, Column)
+        return self.record_key.clone(key=column.value)
+
     def __iter__(self):
         """Iterate over all objects in this view."""
-        return (self.record_class().load(key) for key in self._keys())
+        for (key, col) in ((self.make_key(col), col) for col in self._cols()):
+            self.last_col = col
+            yield self.record_class().load(key)
 
     def _record_key(self, record=None):
         """Return the column name for a given record."""
@@ -136,26 +154,40 @@ class BatchLoadingView(View):
 
     """A view which loads records in bulk."""
 
-    def __init__(self, view_key=None, record_key=None, record_class=None):
+    def __init__(self, view_key=None, record_key=None, record_class=None,
+                 start_col=None, exclusive=False):
         """Initialize the view, setting the chunk_size to a large value."""
-        View.__init__(self, view_key, record_key, record_class)
+        View.__init__(self, view_key, record_key, record_class, start_col,
+                      exclusive)
         self.chunk_size = 5000
 
     def __iter__(self):
         """Batch load and iterate over all objects in this view."""
-        keys = tuple(self._keys())
-        recs = multigetterator(keys, self.consistency)
+        all_cols = self._cols()
 
-        if (self.record_key.keyspace not in recs
-            or self.record_key.column_family not in
-            recs[self.record_key.keyspace]):
-            raise StopIteration()
+        cols = [True]
+        fetched = 0
+        while len(cols) > 0:
+            cols = tuple(islice(all_cols, self.chunk_size))
+            fetched += len(cols)
+            keys = tuple(self.make_key(col) for col in cols)
+            recs = multigetterator(keys, self.consistency)
 
-        data = recs[self.record_key.keyspace][self.record_key.column_family]
+            if (self.record_key.keyspace not in recs
+                or self.record_key.column_family not in
+                recs[self.record_key.keyspace]):
+                raise StopIteration()
 
-        for k in keys:
-            yield (self.record_class()._inject(
-                self.record_key.clone(key=k.key), data[k.key]))
+            data = recs[self.record_key.keyspace][self.record_key.column_family]
+
+            for (index, k) in enumerate(keys):
+                record_data = data[k.key]
+                if k.is_super():
+                    record_data = record_data[k.super_column]
+
+                self.last_col = cols[index]
+                yield (self.record_class()._inject(
+                        self.record_key.clone(key=k.key), record_data))
 
 
 class PartitionedView(object):

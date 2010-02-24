@@ -10,7 +10,7 @@ DEPS       := $(shell find $(PWD)/deps -type f -printf "file://%p ")
 COVERAGE    = $(shell test -x bin/coverage && echo bin/coverage || echo true)
 SETUP       = $(PYTHON) ./setup.py
 EZ_INSTALL  = $(SETUP) easy_install -f "$(DEPS)"
-PYLINT      = bin/pylint
+PYLINT      = bin/pylint --rcfile .pylintrc
 PLATFORM    = $(shell $(PYTHON) -c "from pkg_resources import get_build_platform; print get_build_platform()")
 OS         := $(shell uname)
 EGG        := $(shell $(SETUP) --fullname)-py$(PYVERS).egg
@@ -132,7 +132,7 @@ clean:
 	rm -rf build dist TAGS TAGS.gz digg.egg-info tmp .coverage \
 	       coverage coverage.xml docs lint.html lint.txt profile \
 	       .profile *.egg xunit.xml
-	@if test "$(OS)" = "Linux"; then fakeroot debian/rules clean; fi
+	-@if test "$(OS)" = "Linux"; then fakeroot debian/rules clean; fi
 
 
 xclean: extraclean
